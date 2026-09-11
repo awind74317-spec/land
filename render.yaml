@@ -16,3 +16,11 @@ services:
         value: 20971520
       - key: MAX_PAGES
         value: 200
+      - key: MAX_FILES
+        value: 50
+      - key: OCR_ENABLED
+        value: true
+      - key: OCR_MAX_PAGES
+        value: 30
+      - key: OCR_SCALE
+        value: 2.4
