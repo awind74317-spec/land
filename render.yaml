@@ -21,6 +21,6 @@ services:
       - key: OCR_ENABLED
         value: true
       - key: OCR_MAX_PAGES
-        value: 30
+        value: 12
       - key: OCR_SCALE
-        value: 2.4
+        value: 1.7
