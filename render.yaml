@@ -1,15 +1,15 @@
 services:
   - type: web
     name: land-api
-    runtime: python
+    runtime: node
     plan: free
     autoDeploy: true
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+    buildCommand: npm install
+    startCommand: npm start
     healthCheckPath: /health
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.12.7
+      - key: NODE_VERSION
+        value: 20.19.5
       - key: ALLOWED_ORIGINS
         value: https://awind74317-spec.github.io
       - key: MAX_FILE_BYTES
