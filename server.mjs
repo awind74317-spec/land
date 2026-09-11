@@ -1,7 +1,7 @@
 import express from 'express';
 import multer from 'multer';
 import { getDocument } from 'pdfjs-dist/legacy/build/pdf.mjs';
-import { normalizeTranscriptLabels, parseRealEstateData, toOfflineRows } from './parser-core.mjs';
+import { normalizeTranscriptLabels, parseRealEstateDataList, toOfflineRows } from './parser-core.mjs';
 import { isChangeIndexText, extractNoFromIndex, parseChangeIndexData, summarizeIndex } from './index-core.mjs';
 
 const app = express();
@@ -22,8 +22,8 @@ app.use((req,res,next)=>{
   next();
 });
 
-app.get('/',(_,res)=>res.json({ok:true,service:'land-registry-parser',version:'1.1.0-shared-js-core-batch'}));
-app.get('/health',(_,res)=>res.json({ok:true,status:'healthy',parser:'shared-js-core',batch:true,index_matching:true}));
+app.get('/',(_,res)=>res.json({ok:true,service:'land-registry-parser',version:'1.2.0-elite-parity'}));
+app.get('/health',(_,res)=>res.json({ok:true,status:'healthy',parser:'shared-js-core',batch:true,index_matching:true,multi_transcript:true}));
 
 function composePages(pages){
   return pages.map(items=>{
@@ -61,6 +61,13 @@ async function extractPdfText(file){
 }
 
 function normalizePropertyNo(value){ return String(value||'').replace(/\D/g,''); }
+function looksLikeIndexOnly(item){
+  if(/IDX|異動/i.test(item.file.originalname)) return true;
+  const compact=String(item.text||'').replace(/\s+/g,'');
+  const indexSignals=(compact.match(/資料項目:|異動別:|異動索引/g)||[]).length;
+  const transcriptSignals=(compact.match(/土地登記謄本|建物登記謄本|土地標示部|建物標示部/g)||[]).length;
+  return indexSignals>0 && transcriptSignals===0;
+}
 
 async function parseBatch(files){
   const extracted=[];
@@ -80,31 +87,34 @@ async function parseBatch(files){
       if(!indexMap.has(key)) indexMap.set(key,[]);
       indexMap.get(key).push(...records);
     }
-    indexFiles.push({filename:item.file.originalname,property_no:propertyNo,record_count:records.length});
+    indexFiles.push({filename:item.file.originalname,property_no:propertyNo,record_count:records.length,needs_ocr:records.some(r=>!r.rawHolder||r.rawHolder==='(空白)')});
   }
 
   const rows=[];
   const documents=[];
   const warnings=[];
   for(const item of extracted){
-    const pureIndex=isChangeIndexText(item.text,item.file.originalname) && !/(?:土地|建物)登記(?:第[一二三四五六七八九十0-9]+類)?謄本|(?:土地|建物)標示部/.test(item.text);
-    if(pureIndex) continue;
-    const parsed=parseRealEstateData(item.text,item.file.originalname);
-    const fileRows=toOfflineRows(parsed);
-    const key=normalizePropertyNo(parsed.rawBuildNoForLink || parsed.mainNo);
-    const matched=indexMap.get(key) || [];
-    for(const row of fileRows){
-      row.change_index=summarizeIndex(matched,row.main_no || parsed.mainNo);
-      row.change_index_count=matched.length;
-      row.change_index_records=matched;
-      rows.push(row);
+    if(looksLikeIndexOnly(item)) continue;
+    const parsedList=parseRealEstateDataList(item.text,item.file.originalname);
+    for(const parsed of parsedList){
+      const fileRows=toOfflineRows(parsed);
+      const key=normalizePropertyNo(parsed.rawBuildNoForLink || parsed.mainNo);
+      const matched=indexMap.get(key) || [];
+      for(const row of fileRows){
+        row.change_index=summarizeIndex(matched,row.main_no || parsed.mainNo);
+        row.change_index_count=matched.length;
+        row.change_index_records=matched;
+        rows.push(row);
+      }
+      documents.push({type:parsed.notes.type,main_no:parsed.mainNo,location:parsed.location,address:parsed.notes.address,query_time:parsed.queryTime,source_file:parsed.sourceFile,index_match_count:matched.length});
     }
-    documents.push({type:parsed.notes.type,main_no:parsed.mainNo,location:parsed.location,address:parsed.notes.address,query_time:parsed.queryTime,source_file:item.file.originalname,index_match_count:matched.length});
   }
 
   if(indexFiles.length && ![...indexMap.values()].some(v=>v.length)) warnings.push('已收到異動索引檔，但未辨識到可配對的地號／建號。');
   const unmatched=indexFiles.filter(info=>info.property_no && !documents.some(doc=>normalizePropertyNo(doc.main_no)===normalizePropertyNo(info.property_no)));
   if(unmatched.length) warnings.push(`有 ${unmatched.length} 份異動索引未找到對應謄本。`);
+  const ocrNeeded=indexFiles.filter(info=>info.needs_ocr);
+  if(ocrNeeded.length) warnings.push(`有 ${ocrNeeded.length} 份異動索引的權利人位於圖片列或文字層缺失；雲端 OCR 尚未完全對齊本機 Windows OCR，因此部分歷史權利人暫顯示未載明。`);
 
   return {rows,documents,index_files:indexFiles,warnings};
 }
@@ -113,7 +123,7 @@ app.post('/api/parse',upload.single('file'),async(req,res)=>{
   try{
     if(!req.file) return res.status(400).json({ok:false,error:'未收到 PDF 檔案。'});
     const result=await parseBatch([req.file]);
-    return res.json({ok:true,parser_version:'1.1.0-shared-js-core-batch',filename:req.file.originalname,page_count:result.documents.length?undefined:undefined,file_size:req.file.size,...result,privacy:'PDF 僅在本次請求記憶體中處理，API 不主動保存原始檔。'});
+    return res.json({ok:true,parser_version:'1.2.0-elite-parity',filename:req.file.originalname,file_size:req.file.size,...result,privacy:'PDF 僅在本次請求記憶體中處理，API 不主動保存原始檔。'});
   } catch(error){
     console.error(error);
     const status=error?.status || (error?.code==='LIMIT_FILE_SIZE'?413:422);
@@ -126,7 +136,7 @@ app.post('/api/parse-batch',upload.array('files',maxFiles),async(req,res)=>{
     const files=req.files || [];
     if(!files.length) return res.status(400).json({ok:false,error:'未收到 PDF 檔案。'});
     const result=await parseBatch(files);
-    return res.json({ok:true,parser_version:'1.1.0-shared-js-core-batch',file_count:files.length,total_size:files.reduce((s,f)=>s+f.size,0),...result,privacy:'PDF 僅在本次請求記憶體中處理，API 不主動保存原始檔。'});
+    return res.json({ok:true,parser_version:'1.2.0-elite-parity',file_count:files.length,total_size:files.reduce((s,f)=>s+f.size,0),...result,privacy:'PDF 僅在本次請求記憶體中處理，API 不主動保存原始檔。'});
   } catch(error){
     console.error(error);
     const status=error?.status || (error?.code==='LIMIT_FILE_SIZE'?413:422);
