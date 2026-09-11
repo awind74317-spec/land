@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+runtime/
+tmp/
+js/
+*.lnk
+.vscode/
+.env
+.env.*
+*.log
